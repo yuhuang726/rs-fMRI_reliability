@@ -1,0 +1,55 @@
+---
+title: "tmask_motion_censoring"
+author: "Yu"
+date: "2024-06-18"
+output: html_document
+---
+
+```{r, include=FALSE}
+library(dplyr)
+```
+
+```{r}
+# set working directory
+setwd("/Users/yu/Desktop/24 Summer/fMRI/03_tmask_files")
+
+# tmask_file_list: 100 file names
+tmask_file_list = list.files(pattern = "tmask.txt")
+
+# calculate the zero percentage
+percent_zeros = numeric(length(tmask_file_list))
+
+for (i in 1:length(tmask_file_list)) {
+  data = read.table(tmask_file_list[i], colClasses = "character")
+  zeros_count = sum(data$V1 == "0")
+  percent_zeros[i] = (zeros_count / nrow(data)) * 100
+}
+
+# show the subject and session number
+subject = sapply(tmask_file_list, function(x) {
+  parts = unlist(strsplit(x, "_"))
+  paste(parts[1])
+})
+
+session = sapply(tmask_file_list, function(x) {
+  parts = unlist(strsplit(x, "_"))
+  paste(parts[2])
+})
+
+results = data.frame(subject, session, percent_zeros)
+
+print(results)
+
+# sessions that percent over 30
+percent_over_30 = results %>% filter(percent_zeros > 30) 
+
+print(percent_over_30)
+
+# subject average zero percentage
+subject_average_percent_zeros = results %>% 
+  group_by(subject) %>% 
+  summarise(subject_average_percent_zeros = mean(percent_zeros))
+
+print(subject_average_percent_zeros)
+```
+
