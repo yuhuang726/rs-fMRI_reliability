@@ -1,0 +1,179 @@
+---
+title: "Explore the data2"
+author: "Yu"
+date: "2024-05-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(cifti)
+library(dbicc)
+library(corrplot)
+library(dplyr)
+```
+
+## Load, extract, and save full data list
+
+```{r, eval = FALSE}
+# File path to all files.
+file_path = list.files(path = "/Users/yu/Desktop/24 Summer/fMRI/rs-fMRI/MSC/ptseries", full.names = TRUE, pattern = '_task-rest_bold_mmp_fsLR.ptseries.nii')
+
+# Load and extract dat$data.
+data_list = lapply(file_path, function(file) {
+  dat = read_cifti(file) 
+  transposed_data = t(dat$data) # transposition
+  parcel_names <- names(dat$Parcel) # name of ROI
+  filename <- basename(file)
+  parts <- unlist(strsplit(filename, "_"))
+  subject <- parts[1] # subject
+  session <- parts[2] # session
+  
+  list(data = transposed_data, Parcel = parcel_names, subject = subject, session = session)
+})
+
+save(data_list, file = "/Users/yu/Desktop/24 Summer/fMRI/rs-fMRI/full_data_list.rda")
+```
+
+
+## load full_data_list
+
+```{r}
+load("/Users/yu/Desktop/24 Summer/fMRI/rs-fMRI/full_data_list.rda")
+```
+
+
+## Select target session, time points, and ROIs.
+
+```{r}
+# Define the function.
+
+filter_data = function(data_list, target_sessions, start_time_point, end_time_point, target_ROI = NULL) {
+  filtered_data_list = lapply(data_list, function(item) {
+    if (item$session %in% target_sessions) {
+      data_subset <- item$data[start_time_point:end_time_point, ]
+      colnames(data_subset) = item$Parcel
+      
+      if (!is.null(target_ROI)) {
+        data_subset = data_subset[, target_ROI, drop = FALSE]
+      }
+      
+      df = as.data.frame(data_subset)
+      df$subject = item$subject
+      df$session = item$session
+      df = df %>% select(-subject, -session)
+      return(df)
+    } else {
+      return(NULL)
+    }
+  })
+  
+  filtered_data_list = Filter(Negate(is.null), filtered_data_list)
+  return(filtered_data_list)
+}
+
+# Select target session, time points, and ROIs.
+
+target_sessions = c("ses-func01", "ses-func10")
+start_time_point = 1
+end_time_point = 818
+target_ROI = NULL  # Set particular ROIs if needed: c("R_V1_ROI", "R_MST_ROI", "R_V6_ROI")
+
+filtered_data_list <- filter_data(data_list, target_sessions, start_time_point, end_time_point, target_ROI)
+
+```
+
+
+## Save the file
+
+```{r, eval=FALSE}
+filtered_file_name = sprintf("/Users/yu/Desktop/24 Summer/fMRI/rs-fMRI/filtered_data_lists/filtered_data_list_%s_%d_%d.rda", paste(target_sessions, collapse = "_"), start_time_point, end_time_point)
+
+save(filtered_data_list, file = filtered_file_name)
+
+```
+
+
+## Distance matrix computation
+
+```{r mdist}
+mdist <- function(datalist, method=c("f")) {
+    dmat<-matrix(0,length(datalist),length(datalist))
+    
+    for (i in 2:length(datalist)) for (j in 1:(i-1)){
+        if (method=="r"){
+            v1<-datalist[[i]][lower.tri(datalist[[i]], diag = FALSE)]
+            v2<-datalist[[j]][lower.tri(datalist[[j]], diag = FALSE)]
+            r<-cor(v1,v2)
+            dmat[i,j]=dmat[j,i]=sqrt(1-r)
+        } else if (method=='l1'){
+            dmat[i,j]=dmat[j,i]=sum(abs(datalist[[i]]-datalist[[j]]))
+        } else {
+            dmat[i,j]=dmat[j,i]=norm(datalist[[i]]-datalist[[j]],type=method)
+        }
+    }
+    return(dmat)
+}
+```
+
+```{r,  fig.height = 5, fig.width = 7, fig.align = "center"}
+
+# compute correlation matrices
+cor_data_list <- lapply(filtered_data_list,cor)
+
+# compute the matrix of distances among the correlation matrices
+distmat <- mdist(cor_data_list)
+
+# visualize
+plotdmat(distmat, 10, 2)
+```
+
+
+## Compute the reliability  
+
+We can then input the distance matrix to `dm2icc`, to compute the dbICC:
+```{r dbicc}
+dm2icc(distmat, 10, 2)
+```
+
+
+## Obtain confidence interval for the dbICC, based on 100 boostrap replicates (a larger number of replicates is recommended in practice):
+
+```{r Bootstrap CI}
+dm2icc.bt(distmat, 10, 2, nB = 100)
+```
+
+
+## From the plot, No.15 correlation matrix is quite different than others, so I create a plot for it.
+The whole plot is too big, so here just show the first 100 ROIs.
+
+```{r}
+cor_matrix_15 <- cor_data_list[[15]] 
+
+cor_matrix_15_100 <- cor_matrix_15[1:100, 1:100]
+
+corrplot(cor_matrix_15_100, 
+         method = 'color', 
+         order = "original", 
+         addrect = 2, 
+         tl.col = "black", 
+         tl.cex = 0.3,
+         tl.srt = 45, 
+         is.corr = TRUE)
+```
+
+This is the plot from No.16 correlation matrix.
+```{r}
+cor_matrix_16 <- cor_data_list[[16]] 
+
+cor_matrix_16_100 <- cor_matrix_16[1:100, 1:100]
+
+corrplot(cor_matrix_16_100, 
+         method = 'color', 
+         order = "original", 
+         addrect = 2, 
+         tl.col = "black", 
+         tl.cex = 0.3,
+         tl.srt = 45, 
+         is.corr = TRUE)
+```

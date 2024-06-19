@@ -1,0 +1,211 @@
+---
+title: "Explore the data3"
+author: "Yu"
+date: "2024-05-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(cifti)
+library(dbicc)
+library(corrplot)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+```
+
+
+## load full_data_list
+
+```{r}
+load("/Users/yu/Desktop/24 Summer/fMRI/02_explore_data/full_data_list.rda")
+```
+
+
+## Select target session, time points, and ROIs.
+
+```{r}
+# Define the function.
+
+filter_data = function(data_list, target_sessions, start_time_point, end_time_point, target_ROI = NULL) {
+  filtered_data_list = lapply(data_list, function(item) {
+    if (item$session %in% target_sessions) {
+      data_subset <- item$data[start_time_point:end_time_point, ]
+      colnames(data_subset) = item$Parcel
+      
+      if (!is.null(target_ROI)) {
+        data_subset = data_subset[, target_ROI, drop = FALSE]
+      }
+      
+      df = as.data.frame(data_subset)
+      df$subject = item$subject
+      df$session = item$session
+      df = df %>% select(-subject, -session)
+      return(df)
+    } else {
+      return(NULL)
+    }
+  })
+  
+  filtered_data_list = Filter(Negate(is.null), filtered_data_list)
+  return(filtered_data_list)
+}
+
+# Select target session, time points, and ROIs.
+
+target_sessions = c("ses-func01", "ses-func10")
+start_time_point = 1
+end_time_point = 818
+target_ROI = NULL  # Set particular ROIs if needed: c("R_V1_ROI", "R_MST_ROI", "R_V6_ROI")
+
+filtered_data_list <- filter_data(data_list, target_sessions, start_time_point, end_time_point, target_ROI)
+
+```
+
+
+## Distance matrix computation
+
+```{r mdist}
+mdist <- function(datalist, method=c("f")) {
+    dmat<-matrix(0,length(datalist),length(datalist))
+    
+    for (i in 2:length(datalist)) for (j in 1:(i-1)){
+        if (method=="r"){
+            v1<-datalist[[i]][lower.tri(datalist[[i]], diag = FALSE)]
+            v2<-datalist[[j]][lower.tri(datalist[[j]], diag = FALSE)]
+            r<-cor(v1,v2)
+            dmat[i,j]=dmat[j,i]=sqrt(1-r)
+        } else if (method=='l1'){
+            dmat[i,j]=dmat[j,i]=sum(abs(datalist[[i]]-datalist[[j]]))
+        } else {
+            dmat[i,j]=dmat[j,i]=norm(datalist[[i]]-datalist[[j]],type=method)
+        }
+    }
+    return(dmat)
+}
+```
+
+```{r,  fig.height = 5, fig.width = 7, fig.align = "center"}
+
+# compute correlation matrices
+cor_data_list <- lapply(filtered_data_list,cor)
+
+# compute the matrix of distances among the correlation matrices
+distmat <- mdist(cor_data_list)
+
+# visualize
+plotdmat(distmat, 10, 2)
+```
+
+
+## Compute the reliability  
+
+We can then input the distance matrix to `dm2icc`, to compute the dbICC:
+```{r dbicc}
+dm2icc(distmat, 10, 2)
+```
+
+
+## Obtain confidence interval for the dbICC, based on 100 boostrap replicates (a larger number of replicates is recommended in practice):
+
+```{r Bootstrap CI}
+dm2icc.bt(distmat, 10, 2, nB = 100)
+```
+
+
+## From the plot, No.15 correlation matrix is quite different than others, so I create a plot for it.
+The whole plot is too big, so here just show the first 100 ROIs.
+
+```{r}
+cor_matrix_15 <- cor_data_list[[15]] 
+
+cor_matrix_15_100 <- cor_matrix_15[1:100, 1:100]
+
+corrplot(cor_matrix_15_100, 
+         method = 'color', 
+         order = "original", 
+         addrect = 2, 
+         tl.col = "black", 
+         tl.cex = 0.3,
+         tl.srt = 45, 
+         is.corr = TRUE)
+```
+
+## Find some ROIs have high correlations.
+```{r}
+cor_matrix_15_long = as.data.frame(as.table(cor_matrix_15)) %>% 
+  filter(Var1 != Var2 & abs(Freq) > 0.9) %>% 
+  arrange(desc(abs(Freq))) 
+
+rois = cor_matrix_15_long %>% 
+  count(Var1, sort = TRUE) %>% 
+  head(15) %>% 
+  pull(Var1) %>% 
+  as.factor() %>% 
+  droplevels() %>% 
+  print()
+```
+
+
+# Draw time series plots for these ROIs
+No.15 is the #71 in the full dataset (session 1, subject 8).
+No.16 is the #80 in the full dataset (session 10, subject 8).
+I select 1-200 time points.
+
+```{r}
+data_15 = data_list[[71]] # This is No.15
+data_16 = data_list[[80]] # This is No.16
+
+# Get time series dataframe
+create_time_series_df = function(data, session_label, end_time_point) {
+  df = as.data.frame(data$data)
+  colnames(df) = data$Parcel
+  df$Time = 1:nrow(df)
+  df$Session = session_label
+  df %>% pivot_longer(cols = -c(Time, Session), names_to = "ROI", values_to = "Signal") %>%
+    filter(ROI %in% rois & Time >= 1 & Time <= end_time_point)
+}
+```
+
+## Time series plots for time points 1 to 200.
+
+```{r}
+end_time_point = 200
+
+df_15 <- create_time_series_df(data_15, "data_15(sub08, ses01)", end_time_point)
+df_16 <- create_time_series_df(data_16, "data_16(sub08, ses10)", end_time_point)
+
+# Combine two df
+combined_df <- bind_rows(df_15, df_16)
+
+ggplot(combined_df, aes(x = Time, y = Signal, color = Session)) +
+  geom_line() +
+  facet_wrap(~ ROI, scales = "free_y") +  
+  labs(title = "Time Series Plot for Selected ROIs (Time Points 1-200)",
+       x = "Time Points",
+       y = "Signal Intensity") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+## Time series plots for time points 1 to 818.
+
+```{r}
+end_time_point = 818
+
+df_15 <- create_time_series_df(data_15, "data_15(sub08, ses01)", end_time_point)
+df_16 <- create_time_series_df(data_16, "data_16(sub08, ses10)", end_time_point)
+
+# Combine two df
+combined_df <- bind_rows(df_15, df_16)
+
+ggplot(combined_df, aes(x = Time, y = Signal, color = Session)) +
+  geom_line() +
+  facet_wrap(~ ROI, scales = "free_y") +  
+  labs(title = "Time Series Plot for Selected ROIs (Time Points 1-818)",
+       x = "Time Points",
+       y = "Signal Intensity") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```

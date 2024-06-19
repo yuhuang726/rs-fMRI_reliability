@@ -1,0 +1,204 @@
+---
+title: "Explore the data4"
+author: "Yu"
+date: "2024-05-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(cifti)
+library(dbicc)
+library(corrplot)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(reshape2)
+```
+
+
+## load full_data_list
+```{r}
+load("/Users/yu/Desktop/24 Summer/fMRI/02_explore_data/full_data_list.rda")
+```
+
+
+## Select target session, time points, and ROIs.
+```{r}
+# Define the function.
+filter_data = function(data_list, target_sessions, start_time_point, end_time_point, target_ROI = NULL) {
+  filtered_data_list = lapply(data_list, function(item) {
+    if (item$session %in% target_sessions) {
+      data_subset <- item$data[start_time_point:end_time_point, ]
+      colnames(data_subset) = item$Parcel
+      
+      if (!is.null(target_ROI)) {
+        data_subset = data_subset[, target_ROI, drop = FALSE]
+      }
+      
+      df = as.data.frame(data_subset)
+      df$subject = item$subject
+      df$session = item$session
+      df = df %>% select(-subject, -session)
+      return(df)
+    } else {
+      return(NULL)
+    }
+  })
+  
+  filtered_data_list = Filter(Negate(is.null), filtered_data_list)
+  return(filtered_data_list)
+}
+
+# Select target session, time points, and ROIs.
+target_sessions = sprintf ("ses-func%02d", 1:10)
+start_time_point = 1
+end_time_point = 818
+target_ROI = NULL  # Set particular ROIs if needed: c("R_V1_ROI", "R_MST_ROI", "R_V6_ROI")
+
+filtered_data_list <- filter_data(data_list, target_sessions, start_time_point, end_time_point, target_ROI)
+
+```
+
+
+## matrix distance computation
+```{r mdist}
+# mdist function
+mdist <- function(datalist, method=c("f")) {
+    dmat<-matrix(0,length(datalist),length(datalist))
+    
+    for (i in 2:length(datalist)) for (j in 1:(i-1)){
+        if (method=="r"){
+            v1<-datalist[[i]][lower.tri(datalist[[i]], diag = FALSE)]
+            v2<-datalist[[j]][lower.tri(datalist[[j]], diag = FALSE)]
+            r<-cor(v1,v2)
+            dmat[i,j]=dmat[j,i]=sqrt(1-r)
+        } else if (method=='l1'){
+            dmat[i,j]=dmat[j,i]=sum(abs(datalist[[i]]-datalist[[j]]))
+        } else {
+            dmat[i,j]=dmat[j,i]=norm(datalist[[i]]-datalist[[j]],type=method)
+        }
+    }
+    return(dmat)
+}
+
+# compute correlation matrices
+cor_data_list <- lapply(filtered_data_list,cor)
+
+# compute the matrix of distances among the correlation matrices
+distmat <- mdist(cor_data_list)
+```
+
+## distance plot
+```{r,  fig.height = 5, fig.width = 7}
+distmat_df = as.data.frame(as.table(as.matrix(distmat)))
+names(distmat_df) = c("Var1", "Var2", "Distance")
+
+distmat_df$Var2 = factor(distmat_df$Var2, levels = rev(levels(distmat_df$Var2)))
+
+colors = colorRampPalette(c("white", "blue"))(100)
+
+ggplot(distmat_df, aes(Var1, Var2, fill = Distance)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = colors, limits = c(0, 150)) +  
+  theme_minimal() +
+  labs(title = "Distance Matrix", x = NULL, y = NULL) + 
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), 
+        axis.text.y = element_blank(), axis.ticks.y = element_blank()) 
+```
+
+
+## correlation matrix for all subjects and all sessions
+```{r}
+# calculate correlation
+n = length(cor_data_list)
+correlation_matrix = matrix(0, nrow = n, ncol = n)
+
+for (i in 1:n) {
+  for (j in i:n) {
+    if (i == j) {
+      correlation_matrix[i, j] <- 1  # 对角线元素
+    } else {
+      vector1 = as.vector(cor_data_list[[i]])
+      vector2 = as.vector(cor_data_list[[j]])
+      correlation_matrix[i, j] = cor(vector1, vector2)
+      correlation_matrix[j, i] = correlation_matrix[i, j]
+    }
+  }
+}
+
+# transfer to df
+correlation_matrix_df = melt(correlation_matrix)
+names(correlation_matrix_df) = c("Var1", "Var2", "Correlation")
+
+# change the order
+correlation_matrix_df$Var2 = factor(correlation_matrix_df$Var2, levels = rev(unique(correlation_matrix_df$Var2)))
+
+# color
+colors = colorRampPalette(c("#0000FF", "#00FFFF", "#FFFF00", "#FF0000"))(100)
+
+# plot
+ggplot(correlation_matrix_df, aes(Var1, Var2, fill = Correlation)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = colors, limits = c(0.2, 0.9), name = "Pearson's r") +  # sccale 0.2 to 0.9
+  theme_minimal() +
+  labs(title = "Pairwise Correlation Matrix", x = "Sessions", y = "Sessions") +  
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), 
+        axis.text.y = element_blank(), axis.ticks.y = element_blank()) 
+```
+
+## distance among session in different session interval
+```{r}
+one_session_distances = numeric()
+three_sessions_distances = numeric()
+five_sessions_distances = numeric()
+seven_sessions_distances = numeric()
+
+for (subject in 1:10) {
+  for (session in 1:9) {
+    idx = (subject - 1) * 10 + session
+    
+    # one session interval
+    dist_one_session = distmat[idx, idx + 1]
+    one_session_distances = c(one_session_distances, dist_one_session)
+    
+    # three session interval
+    if (session <= 7) { 
+      dist_three_sessions = distmat[idx, idx + 3]
+      three_sessions_distances = c(three_sessions_distances, dist_three_sessions)
+    }
+    
+    # five session interval
+    if (session <= 5) {
+      dist_five_sessions = distmat[idx, idx + 5]
+      five_sessions_distances = c(five_sessions_distances, dist_five_sessions)
+    }
+    
+    # seven session interval
+    if (session <= 3) {
+      dist_seven_sessions = distmat[idx, idx + 7]
+      seven_sessions_distances = c(seven_sessions_distances, dist_seven_sessions)
+    }
+  }
+}
+
+# transfer to df
+distances_df = data.frame(
+  Distance = c(one_session_distances, three_sessions_distances, five_sessions_distances, seven_sessions_distances),
+  Interval = rep(c("1 Session", "3 Sessions", "5 Sessions", "7 Sessions"), 
+                 c(length(one_session_distances), length(three_sessions_distances), length(five_sessions_distances), length(seven_sessions_distances)))
+)
+```
+
+## boxplot for distance among session in different session interval
+```{r}
+ggplot(distances_df, aes(x = Interval, y = Distance, fill = Interval)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(title = "Distribution of Distances",
+       x = "Time Interval",
+       y = "Distance",
+       fill = "Time Interval") +
+  ylim(30, 100)
+```
+
