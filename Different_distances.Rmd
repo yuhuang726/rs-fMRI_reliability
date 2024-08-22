@@ -1,0 +1,452 @@
+---
+title: "Different distances"
+author: "Yu"
+date: "2024-08-22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(cifti)
+library(dbicc)
+library(corrplot)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(reshape2)
+library(CovTools)
+```
+
+## Load full_data_list
+```{r}
+load("/Users/yu/Library/Mobile Documents/com~apple~CloudDocs/24_Summer/fMRI/02_explore_data/full_data_list.rda")
+```
+
+## Define a function to select target session, time points, and ROIs.
+```{r}
+filter_data = function(data_list, target_sessions, start_time_point, end_time_point, target_ROI = NULL) {
+  filtered_data_list = lapply(data_list, function(item) {
+    if (item$session %in% target_sessions) {
+      data_subset <- item$data[start_time_point:end_time_point, ]
+      colnames(data_subset) = item$Parcel
+      
+      if (!is.null(target_ROI)) {
+        data_subset = data_subset[, target_ROI, drop = FALSE]
+      }
+      
+      df = as.data.frame(data_subset)
+      df$subject = item$subject
+      df$session = item$session
+      df = df %>% select(-subject, -session)
+      return(df)
+    } else {
+      return(NULL)
+    }
+  })
+  
+  filtered_data_list = Filter(Negate(is.null), filtered_data_list)
+  return(filtered_data_list)
+}
+
+# Select target session, time points, and ROIs.
+target_sessions = sprintf ("ses-func%02d", 1:10)
+start_time_point = 1
+end_time_point = 818
+target_ROI = NULL  # Set particular ROIs if needed: c("R_V1_ROI", "R_MST_ROI", "R_V6_ROI")
+
+full_data_list <- filter_data(data_list, target_sessions, start_time_point, end_time_point, target_ROI)
+```
+
+### delete the subject 08
+```{r}
+filtered_data_list <- full_data_list[-(71:80)]
+```
+
+## Look at correlation matrix
+
+### matrix distance computation
+```{r}
+# mdist function
+mdist <- function(datalist, method=c("f")) {
+    dmat<-matrix(0,length(datalist),length(datalist))
+    
+    for (i in 2:length(datalist)) for (j in 1:(i-1)){
+        if (method=="r"){
+            v1<-datalist[[i]][lower.tri(datalist[[i]], diag = FALSE)]
+            v2<-datalist[[j]][lower.tri(datalist[[j]], diag = FALSE)]
+            r<-cor(v1,v2)
+            dmat[i,j]=dmat[j,i]=sqrt(1-r)
+        } else if (method=='l1'){
+            dmat[i,j]=dmat[j,i]=sum(abs(datalist[[i]]-datalist[[j]]))
+        } else {
+            dmat[i,j]=dmat[j,i]=norm(datalist[[i]]-datalist[[j]],type=method)
+        }
+    }
+    return(dmat)
+}
+
+# compute correlation matrices
+cor_data_list <- lapply(filtered_data_list,cor)
+
+# compute the matrix of distances among the correlation matrices
+distmat_l2 <- mdist(cor_data_list)
+distmat_l1 <- mdist(cor_data_list, "l1")
+distmat_root <- mdist(cor_data_list, "r")
+```
+
+## distance plot
+```{r,  fig.height = 5, fig.width = 7}
+plot_distance_matrix <- function(distmat, title) {
+  distmat_df <- as.data.frame(as.table(as.matrix(distmat)))
+  names(distmat_df) <- c("Var1", "Var2", "Distance")
+  distmat_df$Var2 <- factor(distmat_df$Var2, levels = rev(levels(distmat_df$Var2)))
+
+  colors <- colorRampPalette(c("white", "blue"))(100)
+
+  p <- ggplot(distmat_df, aes(Var1, Var2, fill = Distance)) +
+    geom_tile() +
+    scale_fill_gradientn(colors = colors) +
+    theme_minimal() +
+    labs(title = title, x = NULL, y = NULL) +
+    theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), 
+          axis.text.y = element_blank(), axis.ticks.y = element_blank())
+
+  return(p)
+}
+
+plot_distance_matrix(distmat_l2, "Distance Matrix method l2")
+plot_distance_matrix(distmat_l1, "Distance Matrix method l1")
+plot_distance_matrix(distmat_root, "Distance Matrix method root")
+```
+
+## Compute the reliability  
+```{r dbicc}
+dm2icc(distmat_l2,9,10)
+dm2icc(distmat_l1,9,10)
+dm2icc(distmat_root,9,10)
+```
+
+### matrix distance computation (using CovDist)
+```{r}
+## Calculate covariance matrix.
+cor_data_list <- lapply(filtered_data_list,cor)
+
+## transform to 3d array
+p <- ncol(cor_data_list[[1]])
+N <- length(cor_data_list)
+
+cor_array = array(0, dim = c(p, p, N))
+
+for (i in 1:N) {
+  cor_array[,,i] <- cor_data_list[[i]]
+}
+
+# check positive definite indices
+non_positive_definite_indices <- c() 
+
+for (i in seq_len(dim(cor_array)[3])) {
+  eigenvalues <- eigen(cor_array[,,i])$values
+ 
+  if (any(eigenvalues <= 0)) {
+    non_positive_definite_indices <- c(non_positive_definite_indices, i)
+  }
+}
+
+print(non_positive_definite_indices) # 33 74 77 82 are not positive definite
+```
+
+## adjust to positive definite
+```{r}
+# define a funtion
+adjust_to_positive_definite <- function(matrix) {
+
+    min_eigenvalue <- min(eigen(matrix)$values)
+    
+    if (min_eigenvalue <= 0) {
+        adjustment_value <- abs(min_eigenvalue) + 0.01  # plus 0.01
+        matrix <- matrix + diag(adjustment_value, nrow = nrow(matrix))
+    }
+    return(matrix)
+}
+
+# adjust slice 33, 74, 77, 82
+non_positive_def_indices <- c(33, 74, 77, 82)
+for (i in non_positive_def_indices) {
+    cor_array[,,i] <- adjust_to_positive_definite(cor_array[,,i])
+}
+
+# check positive definite
+for (i in non_positive_def_indices) {
+    print(all(eigen(cor_array[,,i])$values > 0))
+}
+```
+
+## get pairwise distance and reliability
+
+### Euclidean
+```{r}
+distance_methods <- c("Euclidean")
+
+results <- data.frame(Method = character(), Reliability = numeric(), stringsAsFactors = FALSE)
+
+for (method in distance_methods) {
+  dist_matrix_euclidean <- CovDist(cor_array, method = method)
+  write.csv(as.data.frame(dist_matrix_euclidean), "dist_matrix_euclidean.csv", row.names = FALSE)
+  
+  reliability_score_euclidean <- dm2icc(dist_matrix_euclidean, 9, 10)
+  
+  results_euclidean <- rbind(results, data.frame(Method = method, Reliability = reliability_score_euclidean))
+  }
+print(results_euclidean)
+
+plot_distance_matrix(dist_matrix_euclidean, "Euclidean") 
+```
+
+### Cholesky
+```{r}
+distance_methods <- c("Cholesky")
+
+results <- data.frame(Method = character(), Reliability = numeric(), stringsAsFactors = FALSE)
+
+for (method in distance_methods) {
+  dist_matrix_cholesky <- CovDist(cor_array, method = method)
+  
+  reliability_score_cholesky <- dm2icc(dist_matrix_cholesky, 9, 10)
+  
+  results_cholesky <- rbind(results, data.frame(Method = method, Reliability = reliability_score_cholesky))
+}
+
+print(results_cholesky)
+
+plot_distance_matrix(dist_matrix_cholesky, "Cholesky")
+```
+
+### LERM
+```{r}
+distance_methods <- c("LERM")
+
+results <- data.frame(Method = character(), Reliability = numeric(), stringsAsFactors = FALSE)
+
+for (method in distance_methods) {
+  dist_matrix_lerm <- CovDist(cor_array, method = method)
+  
+  reliability_score_lerm <- dm2icc(dist_matrix_lerm, 9, 10)
+  
+  results_lerm <- rbind(results, data.frame(Method = method, Reliability = reliability_score_lerm))
+}
+
+print(results_lerm)
+
+plot_distance_matrix(dist_matrix_lerm, "LERM")
+```
+
+Cov
+### matrix distance computation (using CovDist)
+```{r, eval = FALSE}
+## Calculate covariance matrix.
+cov_data_list <- lapply(filtered_data_list,cov)
+
+## transform to 3d array
+p <- ncol(cov_data_list[[1]])
+N <- length(cov_data_list)
+
+cov_array = array(0, dim = c(p, p, N))
+
+for (i in 1:N) {
+  cov_array[,,i] <- cov_data_list[[i]]
+}
+
+# check positive definite indices
+non_positive_definite_indices <- c() 
+
+for (i in seq_len(dim(cov_array)[3])) {
+  eigenvalues <- eigen(cov_array[,,i])$values
+ 
+  if (any(eigenvalues <= 0)) {
+    non_positive_definite_indices <- c(non_positive_definite_indices, i)
+  }
+}
+
+print(non_positive_definite_indices) # 33 74 77 82 are not positive definite
+```
+
+## adjust to positive definite
+```{r, eval = FALSE}
+# define a funtion
+adjust_to_positive_definite <- function(matrix) {
+
+    min_eigenvalue <- min(eigen(matrix)$values)
+    
+    if (min_eigenvalue <= 0) {
+        adjustment_value <- abs(min_eigenvalue) + 0.01  # plus 0.01
+        matrix <- matrix + diag(adjustment_value, nrow = nrow(matrix))
+    }
+    return(matrix)
+}
+
+# adjust slice 33, 74, 77, 82
+non_positive_def_indices <- c(33, 74, 77, 82)
+for (i in non_positive_def_indices) {
+    cov_array[,,i] <- adjust_to_positive_definite(cor_array[,,i])
+}
+
+# check positive definite
+for (i in non_positive_def_indices) {
+    print(all(eigen(cov_array[,,i])$values > 0))
+}
+```
+
+```{r eval = FALSE}
+distance_methods <- c("AIRM")
+
+results <- data.frame(Method = character(), Reliability = numeric(), stringsAsFactors = FALSE)
+
+for (method in distance_methods) {
+  dist_matrix <- CovDist(cov_array, method = method)
+  
+  reliability_score <- dm2icc(dist_matrix, 9, 10)
+  
+  results <- rbind(results, data.frame(Method = method, Reliability = reliability_score))
+}
+
+print(results)
+```
+"AIRM", "Bhattacharyya", "Cholesky", "Euclidean", "Hellinger", "JBLD", "KLDM", "LERM", "Procrustes.SS", "Procrustes.Full", "PowerEuclidean", "RootEuclidean"
+
+```{r}
+# Method         Reliability(Cor)   Reliability(Cov)
+# AIRM            0.1825003         0.1974096
+# Bhattacharyya   NaN
+# Cholesky        0.3621463         0.4015352
+# Euclidean       0.4538179         0.5831219
+# Hellinger       NaN
+# JBLD            NaN
+# KLDM            0.6667029
+# LERM            0.220661          0.2244307
+# Procrustes.SS   0.4242606
+# Procrustes.Full 0.4571571
+# PowerEuclidean  Error
+# RootEuclidean   0.4579008
+```
+
+## Lag-dependent distance-based ICC.
+
+```{r, echo = FALSE}
+# Input:
+# dmat  - an n x n distance matrix
+# sub   - a vector of length n of subject ID's 
+# time  - a vector of length n of times
+# 
+# Output:
+# A list consisting of
+# iccfunc - a function mapping Delta to ICC(Delta), where Delta = time lag
+# model   - the mgcv::gam model fitted for W(Delta)
+# pvalue  - p-value for lag dependence, from the above model
+# range   - range of time lags in the data
+
+licc <- function(dmat, sub, time) {
+    require(mgcv)
+    d2mat <- as.matrix(dmat)^2
+    wmask <- outer(sub,sub,"==")
+    bmask <- 1 - wmask
+    ltmask <- 1*lower.tri(dmat)
+    wmat <- d2mat * wmask * ltmask
+    bmat <- d2mat * bmask * ltmask
+    deltat <- as.matrix(dist(time)) * ltmask
+    wmat[wmat==0] <- bmat[bmat==0] <- deltat[deltat==0] <- NA
+    # list(wmat,bmat)
+    w2 <- as.vector(wmat)
+    delta <- as.vector(deltat)
+    mod <<- gam(w2 ~ s(delta, k = 9), method="REML")
+    func <- Vectorize(function(del) 1 - predict(mod, newdata=data.frame(delta=del)) / mean(bmat, na.rm=TRUE))
+    lst <- list(iccfunc = func, model = mod, 
+                pvalue=summary(mod)$s.table[1,4], range=range(deltat, na.rm=TRUE))
+    class(lst) <- "licc"
+    lst
+}
+
+# Plot method
+plot.licc <- function(x, type="icc", labs=NULL, add.p=TRUE, ...) {
+    subtitle <- if (add.p) paste("Lag dependence p =", signif(x$pvalue,3)) else NULL
+    if (type=="w") {
+        if (is.null(labs)) {
+            xlab <- expression(paste("Time lag ", Delta))
+            ylab <- "Expected within-subject distance"
+        }
+        plot(x$model, shift=x$model$coef[1], xlab=xlab, ylab=ylab, sub=subtitle, ...)
+    }
+    else if (type=="icc") {
+        if (is.null(labs)) {
+            xlab <- expression(paste("Time lag ", Delta))
+            ylab <- "ICC"
+        }
+        grid <- seq(db$range[1],db$range[2],,401)
+        plot(grid,db$iccfunc(grid), type='l', xlab=xlab, ylab=ylab, sub=subtitle, ...)
+    }
+   
+}
+```
+
+```{r}
+# MSC data with (conventional) ICC that (on average) decreases with time lag
+
+subjects <- c(1:7, 9, 10)
+svec <- rep(subjects, each=10)
+tvec <- rep(seq(0, by = 1, length.out = 10), times = length(subjects))
+
+# distance l2
+par(mfrow=c(1,3), oma = c(0, 0, 3, 0))
+require(fields)
+image.plot(distmat_l2[,90:1], col=viridis(256), main="Distance matrix_l2")
+db <- licc(distmat_l2, svec, tvec)
+plot(db, type="w", main=expression(W(Delta)), add.p=FALSE)
+plot(db, type="icc", main=expression(ICC(Delta)))
+mtext("distance l2 (square root of sum of squared differences)", outer = TRUE, cex = 1.5, line = 1)
+
+# distance l1
+par(mfrow=c(1,3), oma = c(0, 0, 3, 0))
+require(fields)
+image.plot(distmat_l1[,90:1], col=viridis(256), main="Distance matrix_l1")
+db <- licc(distmat_l1, svec, tvec)
+plot(db, type="w", main=expression(W(Delta)), add.p=FALSE)
+plot(db, type="icc", main=expression(ICC(Delta)))
+mtext("distance l1 (sum of absolute differences)", outer = TRUE, cex = 1.5, line = 1)
+
+# distance root
+par(mfrow=c(1,3), oma = c(0, 0, 3, 0))
+require(fields)
+image.plot(distmat_root[,90:1], col=viridis(256), main="Distance matrix_root")
+db <- licc(distmat_root, svec, tvec)
+plot(db, type="w", main=expression(W(Delta)), add.p=FALSE)
+plot(db, type="icc", main=expression(ICC(Delta)))
+mtext("distance square root of 1 - r", outer = TRUE, cex = 1.5, line = 1)
+```
+
+```{r}
+# Euclidean
+par(mfrow=c(1,3), oma = c(0, 0, 3, 0))
+require(fields)
+image.plot(dist_matrix_euclidean[,90:1], col=viridis(256), main="Distance matrix_Euclidean")
+db <- licc(dist_matrix_euclidean, svec, tvec)
+plot(db, type="w", main=expression(W(Delta)), add.p=FALSE)
+plot(db, type="icc", main=expression(ICC(Delta)))
+mtext("Euclidean", outer = TRUE, cex = 1.5, line = 1)
+
+# Cholesky
+par(mfrow=c(1,3), oma = c(0, 0, 3, 0))
+require(fields)
+image.plot(dist_matrix_cholesky[,90:1], col=viridis(256), main="Distance matrix_Cholesky")
+db <- licc(dist_matrix_cholesky, svec, tvec)
+plot(db, type="w", main=expression(W(Delta)), add.p=FALSE)
+plot(db, type="icc", main=expression(ICC(Delta)))
+mtext("Cholesky", outer = TRUE, cex = 1.5, line = 1)
+
+# LERM
+par(mfrow=c(1,3), oma = c(0, 0, 3, 0))
+require(fields)
+image.plot(dist_matrix_lerm[,90:1], col=viridis(256), main="Distance matrix_LERM")
+db <- licc(dist_matrix_lerm, svec, tvec)
+plot(db, type="w", main=expression(W(Delta)), add.p=FALSE)
+plot(db, type="icc", main=expression(ICC(Delta)))
+mtext("LERM", outer = TRUE, cex = 1.5, line = 1)
+```
+
